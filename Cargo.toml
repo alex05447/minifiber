@@ -1,0 +1,20 @@
+[package]
+name = "minifiber"
+version = "0.1.0"
+authors = ["N/A <N/A>"]
+edition = "2018"
+
+[lib]
+name = "minifiber"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = [    "std"
+                                            ,"winbase"
+                                            ,"fibersapi"
+]}
+
+[target.'cfg(windows)'.dev-dependencies]
+minithreadlocal = { path = "../minithreadlocal" }
+
+[target.'cfg(windows)'.build-dependencies]
+cc = "1.0"
