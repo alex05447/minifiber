@@ -10,7 +10,10 @@ fn main() {
         panic!("Unsupported target: `{}`", target);
     }
 
-    enum Arch { X86, X64 }
+    enum Arch {
+        X86,
+        X64,
+    }
 
     let arch = match target.split('-').next().unwrap() {
         "x86" => Arch::X86,

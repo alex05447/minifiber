@@ -3,6 +3,8 @@ name = "minifiber"
 version = "0.1.0"
 authors = ["N/A <N/A>"]
 edition = "2018"
+build = "build.rs"
+links = "get_current_fiber"
 
 [lib]
 name = "minifiber"

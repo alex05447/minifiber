@@ -2,6 +2,4 @@
 mod win;
 
 #[cfg(windows)]
-pub use win::{
-    Fiber
-};
+pub use win::Fiber;
