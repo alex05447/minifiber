@@ -1,21 +1,22 @@
-use std::ffi::c_void;
-use std::mem;
+use {
+    std::{ffi::c_void, mem, io},
+    crate::FiberError,
+    winapi::{shared::minwindef::{DWORD, LPVOID}, um::{fibersapi::IsThreadAFiber, winbase::{ConvertThreadToFiberEx, CreateFiberEx, DeleteFiber, SwitchToFiber}}},
+};
 
-use winapi::shared::minwindef::{DWORD, LPVOID};
-use winapi::um::fibersapi::IsThreadAFiber;
-use winapi::um::winbase::{ConvertThreadToFiberEx, CreateFiberEx, DeleteFiber, SwitchToFiber};
-
+/// WinAPI / MSVC `GetCurrentFiber` macro / intrinsic implemented in `.asm`, built by `build.rs`.
 extern "C" {
     fn get_current_fiber() -> LPVOID;
 }
 
 const FIBER_FLAG_FLOAT_SWITCH: DWORD = 0x1;
 
-/// Wrapper around a fiber/green thread/stackful coroutine.
-/// Deallocates the stack when dropped.
+/// Wrapper around a fiber / green thread / stackful coroutine.
+/// Releases the OS object handle / deallocates the stack when dropped.
 /// It's up to the user to ensure all resources used by the fiber have been freed.
 pub struct Fiber {
     fiber: LPVOID,
+    // Need to keep track of fibers created from threads to NOT `DeleteFiber` them.
     from_thread: bool,
     name: Option<String>,
 }
@@ -24,22 +25,28 @@ unsafe impl Send for Fiber {}
 unsafe impl Sync for Fiber {}
 
 impl Fiber {
-    /// Creates a new fiber with specified stack size, name and entry point.
+    /// Creates a new fiber with the specified `stack_size`, `name` and entry point.
+    ///
     /// The fiber does not run until it is switched to via [`switch_to`]
     /// by a thread converted to a fiber via [`from_thread`].
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `stack_size` is `0`.
-    /// Panics if the OS function fails.
+    /// Returns an error if `stack_size` is `0`.
+    /// Returns an error if the OS function fails.
     ///
     /// [`switch_to`]: #method.switch_to
     /// [`from_thread`]: #method.from_thread
-    pub fn new<F>(stack_size: usize, name: Option<&str>, entry_point: F) -> Fiber
+    pub fn new<'n, N, F>(stack_size: usize, name: N, entry_point: F) -> Result<Fiber, FiberError>
     where
+        N: Into<Option<&'n str>>,
         F: FnOnce() + 'static,
     {
-        assert!(stack_size > 0);
+        use FiberError::*;
+
+        if stack_size == 0 {
+            return Err(InvalidStackSize);
+        }
 
         let entry_point = Box::new(entry_point);
 
@@ -52,40 +59,46 @@ impl Fiber {
                 Box::into_raw(entry_point) as _,
             )
         };
-        assert!(!fiber.is_null(), "Fiber creation failed.");
 
-        Fiber {
-            fiber,
-            from_thread: false,
-            name: name.map(|s| String::from(s)),
+        if fiber.is_null() {
+            Err(FailedToCreate(io::Error::last_os_error()))
+        } else {
+            Ok(Fiber {
+                fiber,
+                from_thread: false,
+                name: name.into().map(|s| String::from(s)),
+            })
         }
     }
 
-    /// Converts the current thread to a fiber with specified name.
+    /// Converts the current thread to a fiber with the specified `name`.
+    ///
     /// Stack size is determined by the calling thread stack size.
     /// This allows it to switch to other fibers created via [`new`].
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the OS function fails.
+    /// Returns an error if the OS function fails.
     ///
     /// [`new`]: #method.new
-    pub fn from_thread(name: Option<&str>) -> Fiber {
+    pub fn from_thread(name: Option<&str>) -> Result<Fiber, FiberError> {
         let current_fiber = Fiber::get_current_fiber();
 
         // Current thread is already a fiber - we assume that's OK.
-        let fiber = if current_fiber.is_some() {
-            current_fiber.unwrap()
+        let fiber = if let Some(current_fiber) = current_fiber {
+            current_fiber
         } else {
             unsafe { ConvertThreadToFiberEx(0 as LPVOID, FIBER_FLAG_FLOAT_SWITCH) }
         };
 
-        assert!(!fiber.is_null(), "Fiber creation failed.");
-
-        Fiber {
-            fiber,
-            from_thread: true,
-            name: name.map(|s| String::from(s)),
+        if fiber.is_null() {
+            Err(FiberError::FailedToCreate(io::Error::last_os_error()))
+        } else {
+            Ok(Fiber {
+                fiber,
+                from_thread: true,
+                name: name.map(|s| String::from(s)),
+            })
         }
     }
 
@@ -94,7 +107,7 @@ impl Fiber {
     ///
     /// [`from_thread`]: #method.from_thread
     pub fn switch_to(&self) {
-        assert!(!self.fiber.is_null());
+        debug_assert!(!self.fiber.is_null());
 
         unsafe { SwitchToFiber(self.fiber) };
     }
@@ -138,7 +151,7 @@ impl Fiber {
 
 impl Drop for Fiber {
     fn drop(&mut self) {
-        // Do not drop if created by 'from_thread()'.
+        // Do not delete the fiber if created by `from_thread()`.
         if !self.from_thread {
             unsafe {
                 DeleteFiber(self.fiber);
@@ -149,25 +162,25 @@ impl Drop for Fiber {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    use std::{
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
+    use {
+        std::{
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                Arc,
+            },
+            thread,
         },
-        thread,
+        super::*,
+        minithreadlocal::ThreadLocal
     };
-
-    use minithreadlocal::ThreadLocal;
 
     #[test]
     fn basic() {
         // Fiber to switch to.
         let mut switch_back_to_fiber: ThreadLocal<Fiber> = ThreadLocal::new();
 
-        // Convert the thread to a fiber.
-        let main_fiber = Fiber::from_thread(Some("Main fiber"));
+        // Convert the current thread to a fiber.
+        let main_fiber = Fiber::from_thread(Some("Main fiber")).unwrap();
 
         // Create a couple of other fibers.
         let worker_fiber_1_arg = Arc::new(AtomicUsize::new(0));
@@ -187,7 +200,7 @@ mod tests {
                 "Thread 1 fiber"
             );
             switch_back_to_fiber_for_worker_fiber_1.as_ref().switch_to();
-        });
+        }).unwrap();
 
         let worker_fiber_2_arg = Arc::new(AtomicUsize::new(0));
         let worker_fiber_2_arg_clone = worker_fiber_2_arg.clone();
@@ -206,13 +219,13 @@ mod tests {
                 "Main fiber"
             );
             switch_back_to_fiber_for_worker_fiber_2.as_ref().switch_to();
-        });
+        }).unwrap();
 
         // Create a thread which will run a worker fiber.
         let switch_back_to_fiber_for_thread_1 = switch_back_to_fiber.clone();
         let thread_1 = thread::spawn(move || {
             // Convert to a fiber first.
-            let fiber = Fiber::from_thread(Some("Thread 1 fiber"));
+            let fiber = Fiber::from_thread(Some("Thread 1 fiber")).unwrap();
 
             // Store the fiber to the TLS so that the worker fiber can switch back.
             switch_back_to_fiber_for_thread_1.store(fiber);

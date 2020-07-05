@@ -12,4 +12,4 @@
 
 mod fiber;
 
-pub use fiber::Fiber;
+pub use fiber::{Fiber, FiberError};
