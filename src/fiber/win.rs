@@ -37,9 +37,9 @@ impl Fiber {
     ///
     /// [`switch_to`]: #method.switch_to
     /// [`from_thread`]: #method.from_thread
-    pub fn new<'n, N, F>(stack_size: usize, name: N, entry_point: F) -> Result<Fiber, FiberError>
+    pub fn new<N, F>(stack_size: usize, name: N, entry_point: F) -> Result<Fiber, FiberError>
     where
-        N: Into<Option<&'n str>>,
+        N: Into<Option<String>>,
         F: FnOnce() + 'static,
     {
         use FiberError::*;
@@ -66,7 +66,7 @@ impl Fiber {
             Ok(Fiber {
                 fiber,
                 from_thread: false,
-                name: name.into().map(|s| String::from(s)),
+                name: name.into(),
             })
         }
     }
