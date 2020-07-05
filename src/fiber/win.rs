@@ -81,7 +81,7 @@ impl Fiber {
     /// Returns an error if the OS function fails.
     ///
     /// [`new`]: #method.new
-    pub fn from_thread<'n, N: Into<Option<&'n str>>>(name: N) -> Result<Fiber, FiberError> {
+    pub fn from_thread<N: Into<Option<String>>>(name: N) -> Result<Fiber, FiberError> {
         let current_fiber = Fiber::get_current_fiber();
 
         // Current thread is already a fiber - we assume that's OK.
@@ -180,14 +180,14 @@ mod tests {
         let mut switch_back_to_fiber: ThreadLocal<Fiber> = ThreadLocal::new().unwrap();
 
         // Convert the current thread to a fiber.
-        let main_fiber = Fiber::from_thread(Some("Main fiber")).unwrap();
+        let main_fiber = Fiber::from_thread("Main fiber".to_owned()).unwrap();
 
         // Create a couple of other fibers.
         let worker_fiber_1_arg = Arc::new(AtomicUsize::new(0));
         let worker_fiber_1_arg_clone = worker_fiber_1_arg.clone();
 
         let switch_back_to_fiber_for_worker_fiber_1 = switch_back_to_fiber.clone();
-        let worker_fiber_1 = Fiber::new(64 * 1024, Some("Worker fiber 1"), move || {
+        let worker_fiber_1 = Fiber::new(64 * 1024, "Worker fiber 1".to_owned(), move || {
             // Do some work.
             worker_fiber_1_arg_clone.fetch_add(1, Ordering::SeqCst);
 
@@ -206,7 +206,7 @@ mod tests {
         let worker_fiber_2_arg_clone = worker_fiber_2_arg.clone();
 
         let switch_back_to_fiber_for_worker_fiber_2 = switch_back_to_fiber.clone();
-        let worker_fiber_2 = Fiber::new(64 * 1024, Some("Worker fiber 2"), move || {
+        let worker_fiber_2 = Fiber::new(64 * 1024, "Worker fiber 2".to_owned(), move || {
             // Do some work.
             worker_fiber_2_arg_clone.fetch_add(2, Ordering::SeqCst);
 
@@ -225,7 +225,7 @@ mod tests {
         let switch_back_to_fiber_for_thread_1 = switch_back_to_fiber.clone();
         let thread_1 = thread::spawn(move || {
             // Convert to a fiber first.
-            let fiber = Fiber::from_thread(Some("Thread 1 fiber")).unwrap();
+            let fiber = Fiber::from_thread("Thread 1 fiber".to_owned()).unwrap();
 
             // Store the fiber to the TLS so that the worker fiber can switch back.
             switch_back_to_fiber_for_thread_1.store(fiber).unwrap();
