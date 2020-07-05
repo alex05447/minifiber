@@ -81,7 +81,7 @@ impl Fiber {
     /// Returns an error if the OS function fails.
     ///
     /// [`new`]: #method.new
-    pub fn from_thread(name: Option<&str>) -> Result<Fiber, FiberError> {
+    pub fn from_thread<'n, N: Into<Option<&'n str>>>(name: N) -> Result<Fiber, FiberError> {
         let current_fiber = Fiber::get_current_fiber();
 
         // Current thread is already a fiber - we assume that's OK.
@@ -97,7 +97,7 @@ impl Fiber {
             Ok(Fiber {
                 fiber,
                 from_thread: true,
-                name: name.map(|s| String::from(s)),
+                name: name.into().map(|s| s.into()),
             })
         }
     }
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn basic() {
         // Fiber to switch to.
-        let mut switch_back_to_fiber: ThreadLocal<Fiber> = ThreadLocal::new();
+        let mut switch_back_to_fiber: ThreadLocal<Fiber> = ThreadLocal::new().unwrap();
 
         // Convert the current thread to a fiber.
         let main_fiber = Fiber::from_thread(Some("Main fiber")).unwrap();
@@ -193,13 +193,13 @@ mod tests {
 
             // Switch back to worker thread.
             assert_eq!(
-                switch_back_to_fiber_for_worker_fiber_1
-                    .as_ref()
+                unsafe { switch_back_to_fiber_for_worker_fiber_1
+                    .as_ref_unchecked() }
                     .name()
                     .unwrap(),
                 "Thread 1 fiber"
             );
-            switch_back_to_fiber_for_worker_fiber_1.as_ref().switch_to();
+            unsafe { switch_back_to_fiber_for_worker_fiber_1.as_ref_unchecked() }.switch_to();
         }).unwrap();
 
         let worker_fiber_2_arg = Arc::new(AtomicUsize::new(0));
@@ -212,13 +212,13 @@ mod tests {
 
             // Switch back to main thread.
             assert_eq!(
-                switch_back_to_fiber_for_worker_fiber_2
-                    .as_ref()
+                unsafe { switch_back_to_fiber_for_worker_fiber_2
+                    .as_ref_unchecked() }
                     .name()
                     .unwrap(),
                 "Main fiber"
             );
-            switch_back_to_fiber_for_worker_fiber_2.as_ref().switch_to();
+            unsafe { switch_back_to_fiber_for_worker_fiber_2.as_ref_unchecked() }.switch_to();
         }).unwrap();
 
         // Create a thread which will run a worker fiber.
@@ -228,7 +228,7 @@ mod tests {
             let fiber = Fiber::from_thread(Some("Thread 1 fiber")).unwrap();
 
             // Store the fiber to the TLS so that the worker fiber can switch back.
-            switch_back_to_fiber_for_thread_1.store(fiber);
+            switch_back_to_fiber_for_thread_1.store(fiber).unwrap();
 
             // Switch to `worker_fiber_1`, which will execute it.
             worker_fiber_1.switch_to();
@@ -238,13 +238,13 @@ mod tests {
             assert_eq!(worker_fiber_1_arg.load(Ordering::SeqCst), 1);
 
             // Clean up TLS.
-            switch_back_to_fiber_for_thread_1.take();
+            switch_back_to_fiber_for_thread_1.take().unwrap();
         });
 
         // Run the other worker fiber in the main thread.
 
         // Store the fiber to the TLS so that the worker fiber can switch back.
-        switch_back_to_fiber.store(main_fiber);
+        switch_back_to_fiber.store(main_fiber).unwrap();
 
         // Switch to `worker_fiber_2`, which will execute it.
         worker_fiber_2.switch_to();
@@ -257,7 +257,7 @@ mod tests {
         thread_1.join().unwrap();
 
         // Clean up TLS.
-        switch_back_to_fiber.take();
-        switch_back_to_fiber.free_index();
+        switch_back_to_fiber.take().unwrap();
+        switch_back_to_fiber.free_index().unwrap();
     }
 }
