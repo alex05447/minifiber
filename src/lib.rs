@@ -12,4 +12,4 @@
 
 mod fiber;
 
-pub use fiber::{Fiber, FiberError};
+pub use fiber::{Fiber, FiberEntryPoint, FiberEntryPointFn, FiberError};

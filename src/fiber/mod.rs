@@ -6,4 +6,4 @@ mod win;
 pub use error::FiberError;
 
 #[cfg(windows)]
-pub use win::Fiber;
+pub use win::{Fiber, FiberEntryPoint, FiberEntryPointFn};
