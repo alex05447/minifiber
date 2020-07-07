@@ -34,7 +34,6 @@ pub struct Fiber {
 }
 
 unsafe impl Send for Fiber {}
-unsafe impl Sync for Fiber {}
 
 /// User-provided [`Fiber`] entry point as a closure.
 /// Used for [`Fiber::new`].
