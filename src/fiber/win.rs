@@ -5,7 +5,10 @@ use {
         shared::minwindef::{DWORD, LPVOID},
         um::{
             fibersapi::IsThreadAFiber,
-            winbase::{ConvertThreadToFiberEx, CreateFiberEx, DeleteFiber, SwitchToFiber},
+            winbase::{
+                ConvertFiberToThread, ConvertThreadToFiberEx, CreateFiberEx, DeleteFiber,
+                SwitchToFiber,
+            },
         },
     },
 };
@@ -23,7 +26,8 @@ const FIBER_FLAG_FLOAT_SWITCH: DWORD = 0x1;
 pub struct Fiber {
     // Cleaned up by the `Drop` handler.
     fiber: LPVOID,
-    // Need to keep track of fibers created from threads to NOT `DeleteFiber` them in the `Drop` handler.
+    // Need to keep track of fibers created from threads to NOT `DeleteFiber` them in the `Drop` handler,
+    // but instead to `ConvertFiberToThread`.
     from_thread: bool,
     name: Option<String>,
     // This is here to be dropped when the `Fiber` is dropped,
@@ -171,13 +175,20 @@ impl Fiber {
     /// Converts the current thread to a fiber with the specified `name`.
     ///
     /// Stack size is determined by the calling thread stack size.
-    /// This allows it to switch to other fibers created via [`new`].
+    /// This allows it to [`switch to`] other fibers created via [`new`] / [`new_fn`].
     ///
     /// # Errors
     ///
     /// Returns an error if the OS function fails.
     ///
+    /// # Safety
+    ///
+    /// When the returned `Fiber` is `Drop`'ped, its thread is converted back to a normal thread.
+    /// Hence the user must never `Send` such a fiber to another thread.
+    ///
     /// [`new`]: #method.new
+    /// [`new_fn`]: #method.new_fn
+    /// [`switch_to`]: #method.switch_to
     pub fn from_thread<N: Into<Option<String>>>(name: N) -> Result<Fiber, FiberError> {
         let current_fiber = Fiber::get_current_fiber();
 
@@ -218,15 +229,18 @@ impl Fiber {
         self.name.as_ref().map(|s| s.as_str())
     }
 
-    /// Returns `true` if this fiber was created from a thread.
+    /// Returns `true` if this fiber was [`created from a thread`].
+    ///
+    /// [`created from a thread`]: #method.from_thread
     pub fn is_thread_fiber(&self) -> bool {
         self.from_thread
     }
 
-    /// Frees the OS fiber object and exits / terminates the current thread running it.
+    /// Frees the current thread's OS fiber object and exits / terminates the current thread running it.
     ///
     /// This must be the last call in the entry point of the `Fiber` created via [`new_fn`]
     /// when the `Fiber` would otherwise exit its entry point (thus also exiting / terminating the thread running it).
+    /// This function should not be used otherwise.
     ///
     /// # Safety
     ///
@@ -240,7 +254,7 @@ impl Fiber {
         }
     }
 
-    fn is_thread_a_fiber() -> bool {
+    pub(crate) fn is_thread_a_fiber() -> bool {
         unsafe { IsThreadAFiber() > 0 }
     }
 
@@ -273,8 +287,11 @@ impl Fiber {
 
 impl Drop for Fiber {
     fn drop(&mut self) {
-        // Do not delete the fiber if created by `from_thread()`.
-        if !self.from_thread {
+        if self.from_thread {
+            unsafe {
+                ConvertFiberToThread();
+            }
+        } else {
             unsafe {
                 DeleteFiber(self.fiber);
             }
@@ -335,7 +352,10 @@ mod tests {
         let mut switch_back_to_fiber: ThreadLocal<Fiber> = ThreadLocal::new().unwrap();
 
         // Convert the current thread to a fiber.
+        assert!(!Fiber::is_thread_a_fiber());
         let main_fiber = Fiber::from_thread("Main fiber".to_owned()).unwrap();
+        assert!(main_fiber.is_thread_fiber());
+        assert!(Fiber::is_thread_a_fiber());
 
         // Create a couple of other fibers.
         let worker_fiber_1_arg = Arc::new(AtomicUsize::new(0));
@@ -345,6 +365,8 @@ mod tests {
 
         let switch_back_to_fiber_for_worker_fiber_1 = switch_back_to_fiber.clone();
         let worker_fiber_1 = Fiber::new(64 * 1024, "Worker fiber 1".to_owned(), move || {
+            assert!(Fiber::is_thread_a_fiber());
+
             // Do some work.
             worker_fiber_1_arg_clone.fetch_add(1, Ordering::SeqCst);
 
@@ -361,6 +383,8 @@ mod tests {
         })
         .unwrap();
 
+        assert!(!worker_fiber_1.is_thread_fiber());
+
         assert_eq!(Resource::num_resources(), 1);
 
         let worker_fiber_2_arg = Arc::new(AtomicUsize::new(0));
@@ -370,6 +394,8 @@ mod tests {
 
         let switch_back_to_fiber_for_worker_fiber_2 = switch_back_to_fiber.clone();
         let worker_fiber_2 = Fiber::new(64 * 1024, "Worker fiber 2".to_owned(), move || {
+            assert!(Fiber::is_thread_a_fiber());
+
             // Do some work.
             worker_fiber_2_arg_clone.fetch_add(2, Ordering::SeqCst);
 
@@ -386,13 +412,18 @@ mod tests {
         })
         .unwrap();
 
+        assert!(!worker_fiber_2.is_thread_fiber());
+
         assert_eq!(Resource::num_resources(), 2);
 
         // Create a thread which will run a worker fiber.
         let switch_back_to_fiber_for_thread_1 = switch_back_to_fiber.clone();
         let thread_1 = thread::spawn(move || {
             // Convert to a fiber first.
+            assert!(!Fiber::is_thread_a_fiber());
             let fiber = Fiber::from_thread("Thread 1 fiber".to_owned()).unwrap();
+            assert!(fiber.is_thread_fiber());
+            assert!(Fiber::is_thread_a_fiber());
 
             // Store the fiber to the TLS so that the worker fiber can switch back.
             switch_back_to_fiber_for_thread_1.store(fiber).unwrap();
@@ -409,7 +440,11 @@ mod tests {
             std::mem::drop(worker_fiber_1);
 
             // Clean up TLS.
-            switch_back_to_fiber_for_thread_1.take().unwrap();
+            // Drop the thread fiber and convert the thread back to a normal thread.
+            let fiber = switch_back_to_fiber_for_thread_1.take().unwrap().unwrap();
+            assert!(fiber.is_thread_fiber());
+            std::mem::drop(fiber);
+            assert!(!Fiber::is_thread_a_fiber());
         });
 
         // Run the other worker fiber in the main thread.
@@ -434,7 +469,12 @@ mod tests {
         assert_eq!(Resource::num_resources(), 0);
 
         // Clean up TLS.
-        switch_back_to_fiber.take().unwrap();
+        let main_fiber = switch_back_to_fiber.take().unwrap().unwrap();
         switch_back_to_fiber.free_index().unwrap();
+
+        // Drop the main fiber and convert the main thread back to a normal thread.
+        assert!(main_fiber.is_thread_fiber());
+        std::mem::drop(main_fiber);
+        assert!(!Fiber::is_thread_a_fiber());
     }
 }
