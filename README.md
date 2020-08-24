@@ -1,6 +1,6 @@
 # minifiber
 
-Thin wrapper around the Windows fiber API.
+Thin Rust wrapper around the Windows fiber API.
 
 Technically provides a portable API, but implemented only for Windows at the moment.
 
@@ -8,4 +8,4 @@ See [`fibers`](https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-win
 
 Run `cargo --doc` for documentation.
 
-Uses [`winapi`](https://docs.rs/winapi/0.3.8/winapi/).
+Uses [`winapi`](https://docs.rs/winapi/*/winapi/) on Windows.
