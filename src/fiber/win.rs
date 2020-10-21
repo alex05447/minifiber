@@ -173,13 +173,16 @@ impl Fiber {
     }
 
     /// Converts the current thread to a fiber with the specified `name`.
+    /// This allows it to [`switch to`] other fibers created via [`new`] / [`new_fn`].
     ///
     /// Stack size is determined by the calling thread stack size.
-    /// This allows it to [`switch to`] other fibers created via [`new`] / [`new_fn`].
     ///
     /// # Errors
     ///
-    /// Returns an error if the OS function fails.
+    /// Returns an error if the OS function fails,
+    /// or if the current thread was already converted to a fiber via a previous call
+    /// to this method and has not been converted back to a normal, non-fiber thread
+    /// by dropping the returned fiber object.
     ///
     /// # Safety
     ///
@@ -190,14 +193,11 @@ impl Fiber {
     /// [`new_fn`]: #method.new_fn
     /// [`switch_to`]: #method.switch_to
     pub fn from_thread<N: Into<Option<String>>>(name: N) -> Result<Fiber, FiberError> {
-        let current_fiber = Fiber::get_current_fiber();
+        if Fiber::get_current_fiber().is_some() {
+            return Err(FiberError::ThreadAlreadyAFiber);
+        }
 
-        // Current thread is already a fiber - we assume that's OK.
-        let fiber = if let Some(current_fiber) = current_fiber {
-            current_fiber
-        } else {
-            unsafe { ConvertThreadToFiberEx(0 as LPVOID, FIBER_FLAG_FLOAT_SWITCH) }
-        };
+        let fiber = unsafe { ConvertThreadToFiberEx(0 as LPVOID, FIBER_FLAG_FLOAT_SWITCH) };
 
         if fiber.is_null() {
             Err(FiberError::FailedToCreate(io::Error::last_os_error()))
@@ -356,6 +356,8 @@ mod tests {
         let main_fiber = Fiber::from_thread("Main fiber".to_owned()).unwrap();
         assert!(main_fiber.is_thread_fiber());
         assert!(Fiber::is_thread_a_fiber());
+
+        assert!(matches!(Fiber::from_thread(None).err().unwrap(), FiberError::ThreadAlreadyAFiber));
 
         // Create a couple of other fibers.
         let worker_fiber_1_arg = Arc::new(AtomicUsize::new(0));
