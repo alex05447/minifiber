@@ -173,7 +173,7 @@ impl Fiber {
     }
 
     /// Converts the current thread to a fiber with the specified `name`.
-    /// This allows it to [`switch to`] other fibers created via [`new`] / [`new_fn`].
+    /// This allows it to [`switch_to`] other fibers created via [`new`] / [`new_fn`].
     ///
     /// Stack size is determined by the calling thread stack size.
     ///
@@ -226,7 +226,7 @@ impl Fiber {
     /// [`new`]: #method.new
     /// [`from_thread`]: #method.from_thread
     pub fn name(&self) -> Option<&str> {
-        self.name.as_ref().map(|s| s.as_str())
+        self.name.as_ref().map(String::as_str)
     }
 
     /// Returns `true` if this fiber was [`created from a thread`].
@@ -357,7 +357,10 @@ mod tests {
         assert!(main_fiber.is_thread_fiber());
         assert!(Fiber::is_thread_a_fiber());
 
-        assert!(matches!(Fiber::from_thread(None).err().unwrap(), FiberError::ThreadAlreadyAFiber));
+        assert!(matches!(
+            Fiber::from_thread(None).err().unwrap(),
+            FiberError::ThreadAlreadyAFiber
+        ));
 
         // Create a couple of other fibers.
         let worker_fiber_1_arg = Arc::new(AtomicUsize::new(0));
