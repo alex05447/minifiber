@@ -43,13 +43,23 @@ fn main() {
         }
     }
 
+    type NamedFiber = Fiber<String>;
+
     assert_eq!(Resource::num_resources(), 0);
 
     // Fiber to switch to.
-    let mut switch_back_to_fiber: ThreadLocal<Fiber> = ThreadLocal::new().unwrap();
+    let mut switch_back_to_fiber: ThreadLocal<NamedFiber> = ThreadLocal::new().unwrap();
 
     // Convert the current thread to a fiber.
-    let main_fiber = Fiber::from_thread("Main fiber".to_owned()).unwrap();
+    assert!(!NamedFiber::is_thread_a_fiber());
+    let main_fiber = NamedFiber::from_thread("Main fiber".to_owned()).unwrap();
+    assert!(main_fiber.is_thread_fiber());
+    assert!(NamedFiber::is_thread_a_fiber());
+
+    assert!(matches!(
+        Fiber::from_thread("".to_string()).err().unwrap(),
+        FiberError::ThreadAlreadyAFiber
+    ));
 
     // Create a couple of other fibers.
     let worker_fiber_1_arg = Arc::new(AtomicUsize::new(0));
@@ -59,6 +69,8 @@ fn main() {
 
     let switch_back_to_fiber_for_worker_fiber_1 = switch_back_to_fiber.clone();
     let worker_fiber_1 = Fiber::new(64 * 1024, "Worker fiber 1".to_owned(), move || {
+        assert!(NamedFiber::is_thread_a_fiber());
+
         // Do some work.
         worker_fiber_1_arg_clone.fetch_add(1, Ordering::SeqCst);
 
@@ -67,13 +79,14 @@ fn main() {
         // Switch back to worker thread.
         assert_eq!(
             unsafe { switch_back_to_fiber_for_worker_fiber_1.as_ref_unchecked() }
-                .name()
-                .unwrap(),
+                .state(),
             "Thread 1 fiber"
         );
         unsafe { switch_back_to_fiber_for_worker_fiber_1.as_ref_unchecked() }.switch_to();
     })
     .unwrap();
+
+    assert!(!worker_fiber_1.is_thread_fiber());
 
     assert_eq!(Resource::num_resources(), 1);
 
@@ -84,6 +97,8 @@ fn main() {
 
     let switch_back_to_fiber_for_worker_fiber_2 = switch_back_to_fiber.clone();
     let worker_fiber_2 = Fiber::new(64 * 1024, "Worker fiber 2".to_owned(), move || {
+        assert!(NamedFiber::is_thread_a_fiber());
+
         // Do some work.
         worker_fiber_2_arg_clone.fetch_add(2, Ordering::SeqCst);
 
@@ -92,13 +107,14 @@ fn main() {
         // Switch back to main thread.
         assert_eq!(
             unsafe { switch_back_to_fiber_for_worker_fiber_2.as_ref_unchecked() }
-                .name()
-                .unwrap(),
+                .state(),
             "Main fiber"
         );
         unsafe { switch_back_to_fiber_for_worker_fiber_2.as_ref_unchecked() }.switch_to();
     })
     .unwrap();
+
+    assert!(!worker_fiber_2.is_thread_fiber());
 
     assert_eq!(Resource::num_resources(), 2);
 
@@ -106,7 +122,10 @@ fn main() {
     let switch_back_to_fiber_for_thread_1 = switch_back_to_fiber.clone();
     let thread_1 = thread::spawn(move || {
         // Convert to a fiber first.
+        assert!(!NamedFiber::is_thread_a_fiber());
         let fiber = Fiber::from_thread("Thread 1 fiber".to_owned()).unwrap();
+        assert!(fiber.is_thread_fiber());
+        assert!(NamedFiber::is_thread_a_fiber());
 
         // Store the fiber to the TLS so that the worker fiber can switch back.
         switch_back_to_fiber_for_thread_1.store(fiber).unwrap();
@@ -123,7 +142,11 @@ fn main() {
         std::mem::drop(worker_fiber_1);
 
         // Clean up TLS.
-        switch_back_to_fiber_for_thread_1.take().unwrap();
+        // Drop the thread fiber and convert the thread back to a normal thread.
+        let fiber = switch_back_to_fiber_for_thread_1.take().unwrap().unwrap();
+        assert!(fiber.is_thread_fiber());
+        std::mem::drop(fiber);
+        assert!(!NamedFiber::is_thread_a_fiber());
     });
 
     // Run the other worker fiber in the main thread.
@@ -148,6 +171,11 @@ fn main() {
     assert_eq!(Resource::num_resources(), 0);
 
     // Clean up TLS.
-    switch_back_to_fiber.take().unwrap();
+    let main_fiber = switch_back_to_fiber.take().unwrap().unwrap();
     switch_back_to_fiber.free_index().unwrap();
+
+    // Drop the main fiber and convert the main thread back to a normal thread.
+    assert!(main_fiber.is_thread_fiber());
+    std::mem::drop(main_fiber);
+    assert!(!NamedFiber::is_thread_a_fiber());
 }

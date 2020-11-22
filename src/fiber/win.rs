@@ -23,21 +23,23 @@ const FIBER_FLAG_FLOAT_SWITCH: DWORD = 0x1;
 /// Wrapper around a fiber / green thread / stackful coroutine.
 /// Releases the OS object handle / deallocates the stack when dropped.
 /// It's up to the user to ensure all resources used by the fiber have been freed.
-pub struct Fiber {
+/// `T` is custom, arbitrary per-fiber state.
+pub struct Fiber<T> {
     // Cleaned up by the `Drop` handler.
     fiber: LPVOID,
     // Need to keep track of fibers created from threads to NOT `DeleteFiber` them in the `Drop` handler,
     // but instead to `ConvertFiberToThread`.
     from_thread: bool,
-    name: Option<String>,
     // This is here to be dropped when the `Fiber` is dropped,
     // freeing the `entry_point` memory and all its owned resources.
     //
     // Only used by `Fibers` created via `new`.
     _entry_point: Option<Box<dyn FiberEntryPoint>>,
+    // Custom per-fiber state.
+    state: T,
 }
 
-unsafe impl Send for Fiber {}
+unsafe impl<T: Send> Send for Fiber<T> {}
 
 /// User-provided [`Fiber`] entry point as a closure.
 /// Used for [`Fiber::new`].
@@ -55,8 +57,8 @@ impl<F: FnOnce() + 'static> FiberEntryPoint for F {}
 /// [`Fiber::new_fn`]: struct.Fiber.html#method.new_fn
 pub type FiberEntryPointFn = unsafe extern "system" fn(*mut c_void);
 
-impl Fiber {
-    /// Creates a new fiber with the specified `stack_size`, `name` and [`entry_point`].
+impl<T> Fiber<T> {
+    /// Creates a new fiber with the specified `stack_size`, `state` and [`entry_point`].
     ///
     /// The fiber does not run until it is switched to via [`switch_to`]
     /// by a thread converted to a fiber via [`from_thread`].
@@ -84,18 +86,14 @@ impl Fiber {
     /// [`switch_to`]: #method.switch_to
     /// [`from_thread`]: #method.from_thread
     /// [`new`]: #method.new
-    pub fn new<N, F>(stack_size: usize, name: N, entry_point: F) -> Result<Fiber, FiberError>
-    where
-        N: Into<Option<String>>,
-        F: FiberEntryPoint,
-    {
+    pub fn new<F: FiberEntryPoint>(stack_size: usize, state: T, entry_point: F) -> Result<Self, FiberError> {
         let entry_point: Box<dyn FiberEntryPoint> = Box::new(entry_point);
 
         let mut fiber = unsafe {
             Self::new_fn(
                 stack_size,
-                name,
-                Fiber::fiber_entry_point::<F>,
+                state,
+                Self::fiber_entry_point::<F>,
                 entry_point.as_ref() as *const _ as _,
             )
         }?;
@@ -105,7 +103,7 @@ impl Fiber {
         Ok(fiber)
     }
 
-    /// Creates a new fiber with the specified `stack_size`, `name` and raw entry point function.
+    /// Creates a new fiber with the specified `stack_size`, `state` and raw entry point function.
     /// Provided `arg` (which may be null) is passed to the entry point.
     ///
     /// The fiber does not run until it is switched to via [`switch_to`]
@@ -137,15 +135,12 @@ impl Fiber {
     /// [`from_thread`]: #method.from_thread
     /// [`free_fiber`]: #method.free_fiber
     /// [`new_fn`]: #method.new_fn
-    pub unsafe fn new_fn<N>(
+    pub unsafe fn new_fn(
         stack_size: usize,
-        name: N,
+        state: T,
         entry_point: FiberEntryPointFn,
         arg: *mut c_void,
-    ) -> Result<Fiber, FiberError>
-    where
-        N: Into<Option<String>>,
-    {
+    ) -> Result<Self, FiberError> {
         use FiberError::*;
 
         if stack_size == 0 {
@@ -166,13 +161,13 @@ impl Fiber {
             Ok(Fiber {
                 fiber,
                 from_thread: false,
-                name: name.into(),
                 _entry_point: None,
+                state,
             })
         }
     }
 
-    /// Converts the current thread to a fiber with the specified `name`.
+    /// Converts the current thread to a fiber with the specified `state`.
     /// This allows it to [`switch_to`] other fibers created via [`new`] / [`new_fn`].
     ///
     /// Stack size is determined by the calling thread stack size.
@@ -192,8 +187,8 @@ impl Fiber {
     /// [`new`]: #method.new
     /// [`new_fn`]: #method.new_fn
     /// [`switch_to`]: #method.switch_to
-    pub fn from_thread<N: Into<Option<String>>>(name: N) -> Result<Fiber, FiberError> {
-        if Fiber::get_current_fiber().is_some() {
+    pub fn from_thread(state: T) -> Result<Self, FiberError> {
+        if Self::get_current_fiber().is_some() {
             return Err(FiberError::ThreadAlreadyAFiber);
         }
 
@@ -205,8 +200,8 @@ impl Fiber {
             Ok(Fiber {
                 fiber,
                 from_thread: true,
-                name: name.into(),
                 _entry_point: None,
+                state
             })
         }
     }
@@ -221,12 +216,20 @@ impl Fiber {
         unsafe { SwitchToFiber(self.fiber) };
     }
 
-    /// Returns the fiber's name, if any was provided on creation via [`new`] / [`from_thread`].
+    /// Returns the reference to the per-fiber state, which was provided to it on creation via [`new`] / [`from_thread`].
     ///
     /// [`new`]: #method.new
     /// [`from_thread`]: #method.from_thread
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_ref().map(String::as_str)
+    pub fn state(&self) -> &T {
+        &self.state
+    }
+
+    /// Returns the mutable reference to the per-fiber state, which was provided to it on creation via [`new`] / [`from_thread`].
+    ///
+    /// [`new`]: #method.new
+    /// [`from_thread`]: #method.from_thread
+    pub fn state_mut(&mut self) -> &mut T {
+        &mut self.state
     }
 
     /// Returns `true` if this fiber was [`created from a thread`].
@@ -254,7 +257,10 @@ impl Fiber {
         }
     }
 
-    pub(crate) fn is_thread_a_fiber() -> bool {
+    /// Returns `true` if the current thread has been converted to a fiber via [`from_thread`].
+    ///
+    /// [`from_thread`]: #method.from_thread
+    pub fn is_thread_a_fiber() -> bool {
         unsafe { IsThreadAFiber() > 0 }
     }
 
@@ -281,11 +287,11 @@ impl Fiber {
         // Quote from https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-deletefiber:
         // "... If the currently running fiber calls DeleteFiber, its thread calls ExitThread and terminates. "
 
-        unsafe { Fiber::free_fiber() };
+        unsafe { Self::free_fiber() };
     }
 }
 
-impl Drop for Fiber {
+impl<T> Drop for Fiber<T> {
     fn drop(&mut self) {
         if self.from_thread {
             unsafe {
@@ -346,19 +352,21 @@ mod tests {
             }
         }
 
+        type NamedFiber = Fiber<String>;
+
         assert_eq!(Resource::num_resources(), 0);
 
         // Fiber to switch to.
-        let mut switch_back_to_fiber: ThreadLocal<Fiber> = ThreadLocal::new().unwrap();
+        let mut switch_back_to_fiber: ThreadLocal<NamedFiber> = ThreadLocal::new().unwrap();
 
         // Convert the current thread to a fiber.
-        assert!(!Fiber::is_thread_a_fiber());
-        let main_fiber = Fiber::from_thread("Main fiber".to_owned()).unwrap();
+        assert!(!NamedFiber::is_thread_a_fiber());
+        let main_fiber = NamedFiber::from_thread("Main fiber".to_owned()).unwrap();
         assert!(main_fiber.is_thread_fiber());
-        assert!(Fiber::is_thread_a_fiber());
+        assert!(NamedFiber::is_thread_a_fiber());
 
         assert!(matches!(
-            Fiber::from_thread(None).err().unwrap(),
+            Fiber::from_thread("".to_string()).err().unwrap(),
             FiberError::ThreadAlreadyAFiber
         ));
 
@@ -370,7 +378,7 @@ mod tests {
 
         let switch_back_to_fiber_for_worker_fiber_1 = switch_back_to_fiber.clone();
         let worker_fiber_1 = Fiber::new(64 * 1024, "Worker fiber 1".to_owned(), move || {
-            assert!(Fiber::is_thread_a_fiber());
+            assert!(NamedFiber::is_thread_a_fiber());
 
             // Do some work.
             worker_fiber_1_arg_clone.fetch_add(1, Ordering::SeqCst);
@@ -380,8 +388,7 @@ mod tests {
             // Switch back to worker thread.
             assert_eq!(
                 unsafe { switch_back_to_fiber_for_worker_fiber_1.as_ref_unchecked() }
-                    .name()
-                    .unwrap(),
+                    .state(),
                 "Thread 1 fiber"
             );
             unsafe { switch_back_to_fiber_for_worker_fiber_1.as_ref_unchecked() }.switch_to();
@@ -399,7 +406,7 @@ mod tests {
 
         let switch_back_to_fiber_for_worker_fiber_2 = switch_back_to_fiber.clone();
         let worker_fiber_2 = Fiber::new(64 * 1024, "Worker fiber 2".to_owned(), move || {
-            assert!(Fiber::is_thread_a_fiber());
+            assert!(NamedFiber::is_thread_a_fiber());
 
             // Do some work.
             worker_fiber_2_arg_clone.fetch_add(2, Ordering::SeqCst);
@@ -409,8 +416,7 @@ mod tests {
             // Switch back to main thread.
             assert_eq!(
                 unsafe { switch_back_to_fiber_for_worker_fiber_2.as_ref_unchecked() }
-                    .name()
-                    .unwrap(),
+                    .state(),
                 "Main fiber"
             );
             unsafe { switch_back_to_fiber_for_worker_fiber_2.as_ref_unchecked() }.switch_to();
@@ -425,10 +431,10 @@ mod tests {
         let switch_back_to_fiber_for_thread_1 = switch_back_to_fiber.clone();
         let thread_1 = thread::spawn(move || {
             // Convert to a fiber first.
-            assert!(!Fiber::is_thread_a_fiber());
+            assert!(!NamedFiber::is_thread_a_fiber());
             let fiber = Fiber::from_thread("Thread 1 fiber".to_owned()).unwrap();
             assert!(fiber.is_thread_fiber());
-            assert!(Fiber::is_thread_a_fiber());
+            assert!(NamedFiber::is_thread_a_fiber());
 
             // Store the fiber to the TLS so that the worker fiber can switch back.
             switch_back_to_fiber_for_thread_1.store(fiber).unwrap();
@@ -449,7 +455,7 @@ mod tests {
             let fiber = switch_back_to_fiber_for_thread_1.take().unwrap().unwrap();
             assert!(fiber.is_thread_fiber());
             std::mem::drop(fiber);
-            assert!(!Fiber::is_thread_a_fiber());
+            assert!(!NamedFiber::is_thread_a_fiber());
         });
 
         // Run the other worker fiber in the main thread.
@@ -480,6 +486,6 @@ mod tests {
         // Drop the main fiber and convert the main thread back to a normal thread.
         assert!(main_fiber.is_thread_fiber());
         std::mem::drop(main_fiber);
-        assert!(!Fiber::is_thread_a_fiber());
+        assert!(!NamedFiber::is_thread_a_fiber());
     }
 }
